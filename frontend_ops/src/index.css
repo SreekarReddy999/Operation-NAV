@@ -1591,3 +1591,41 @@ button:disabled {
     width: 150px;
   }
 }
+
+/* Keep fund dashboards mounted so switching tabs is faster. */
+
+.selected-fund-workspace {
+  position: relative;
+  min-width: 0;
+}
+
+.fund-dashboard-stack {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.fund-dashboard-panel.is-active {
+  position: relative;
+  width: 100%;
+  visibility: visible;
+  pointer-events: auto;
+  z-index: 1;
+}
+
+.fund-dashboard-panel.is-inactive {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.chart-sampling-note {
+  margin: 10px 2px 0;
+  color: #9298aa;
+  font-size: 11px;
+  line-height: 1.5;
+}
