@@ -1,32 +1,545 @@
 import { useState } from 'react'
+import type { ReactNode } from 'react'
 import {
   Activity,
+  AlertTriangle,
   ArrowUpRight,
   ChartNoAxesCombined,
+  ChevronRight,
   CloudUpload,
+  Database,
   FileSpreadsheet,
   Layers3,
   LoaderCircle,
   ShieldCheck,
   Sparkles,
+  TrendingDown,
+  TrendingUp,
   X,
 } from 'lucide-react'
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 import './index.css'
 
-type ApiResponse = Record<string, unknown>
+type HistoricalPoint = {
+  date: string
+  nav: number
+}
+
+type FundMetrics = {
+  observations: number
+  start_date: string
+  end_date: string
+  starting_nav: number
+  latest_nav: number
+  total_return_pct: number
+  annualised_return_pct: number
+  annualised_volatility_pct: number
+  max_drawdown_pct: number
+  return_30_observations_pct: number | null
+  return_90_observations_pct: number | null
+  return_252_observations_pct: number | null
+}
+
+type CleaningStats = {
+  original_rows: number
+  final_rows: number
+  removed_rows: number
+  invalid_date_rows: number
+  invalid_nav_rows: number
+  non_positive_nav_rows: number
+  duplicate_date_rows: number
+}
+
+type FundResult = {
+  fund_name: string
+  source_file: string
+  historical: HistoricalPoint[]
+  metrics: FundMetrics
+  warnings: string[]
+  cleaning: CleaningStats
+}
+
+type ApiResponse = {
+  application?: string
+  product_name?: string | null
+  fund_count?: number
+  funds?: FundResult[]
+  file_errors?: Array<{
+    filename?: string
+    error?: string
+  }>
+  disclaimer?: string
+}
+
+function formatNumber(
+  value: number | null | undefined,
+  decimals = 2,
+): string {
+  if (
+    value === null ||
+    value === undefined ||
+    !Number.isFinite(value)
+  ) {
+    return 'Not available'
+  }
+
+  return value.toFixed(decimals)
+}
+
+function formatPercent(
+  value: number | null | undefined,
+): string {
+  if (
+    value === null ||
+    value === undefined ||
+    !Number.isFinite(value)
+  ) {
+    return 'Not available'
+  }
+
+  return `${value > 0 ? '+' : ''}${value.toFixed(2)}%`
+}
+
+function formatDate(dateString: string): string {
+  if (!dateString) return '—'
+
+  const [year, month, day] = dateString.split('-').map(Number)
+
+  if (!year || !month || !day) return dateString
+
+  return new Date(year, month - 1, day).toLocaleDateString('en-IN', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  })
+}
+
+function MetricCard({
+  label,
+  value,
+  description,
+  icon,
+}: {
+  label: string
+  value: string
+  description: string
+  icon: ReactNode
+}) {
+  return (
+    <div className="metric-card">
+      <div className="metric-card-top">
+        <span>{label}</span>
+        <div className="metric-icon">{icon}</div>
+      </div>
+
+      <strong className="metric-value">{value}</strong>
+      <span className="metric-description">{description}</span>
+    </div>
+  )
+}
+
+function ReturnCard({
+  label,
+  value,
+  description,
+}: {
+  label: string
+  value: number | null
+  description: string
+}) {
+  const available =
+    value !== null && Number.isFinite(value)
+
+  const valueClass =
+    available && value > 0
+      ? 'positive-value'
+      : available && value < 0
+        ? 'negative-value'
+        : ''
+
+  return (
+    <div className="return-card">
+      <span className="return-label">{label}</span>
+      <strong className={valueClass}>
+        {formatPercent(value)}
+      </strong>
+      <small>{description}</small>
+    </div>
+  )
+}
+
+function FundDashboard({
+  fund,
+}: {
+  fund: FundResult
+}) {
+  const metrics = fund.metrics
+  const historical = fund.historical ?? []
+  const warnings = fund.warnings ?? []
+  const cleaning = fund.cleaning
+
+  // Normalize API values before passing them to Recharts.
+  // This protects the chart if NAV values arrive as numeric strings.
+  const chartData = historical
+    .map((point) => ({
+      date: String(point.date ?? ''),
+      nav: Number(point.nav),
+    }))
+    .filter(
+      (point) =>
+        point.date.length > 0 &&
+        Number.isFinite(point.nav),
+    )
+
+  const latestIsPositive = metrics.total_return_pct >= 0
+
+  return (
+    <article className="fund-dashboard">
+      <div className="fund-dashboard-header">
+        <div className="fund-heading-main">
+          <div className="fund-number">FUND ANALYSIS</div>
+
+          <h3>{fund.fund_name}</h3>
+
+          <p>
+            <FileSpreadsheet size={13} />
+            {fund.source_file}
+          </p>
+        </div>
+
+        <div className="fund-observation-badge">
+          <Database size={15} />
+          {metrics.observations} observations
+        </div>
+      </div>
+
+      {/* Key fund metrics */}
+
+      <div className="metrics-grid">
+        <MetricCard
+          label="Latest NAV"
+          value={formatNumber(metrics.latest_nav, 4)}
+          description={`As of ${formatDate(metrics.end_date)}`}
+          icon={<Activity size={17} />}
+        />
+
+        <MetricCard
+          label="Starting NAV"
+          value={formatNumber(metrics.starting_nav, 4)}
+          description={`Since ${formatDate(metrics.start_date)}`}
+          icon={<Layers3 size={17} />}
+        />
+
+        <MetricCard
+          label="Total return"
+          value={formatPercent(metrics.total_return_pct)}
+          description="Return across the full period"
+          icon={
+            latestIsPositive
+              ? <TrendingUp size={17} />
+              : <TrendingDown size={17} />
+          }
+        />
+
+        <MetricCard
+          label="Annualised return"
+          value={formatPercent(metrics.annualised_return_pct)}
+          description="Annualised historical return"
+          icon={<ArrowUpRight size={17} />}
+        />
+
+        <MetricCard
+          label="Annualised volatility"
+          value={formatPercent(metrics.annualised_volatility_pct)}
+          description="Historical NAV return variability"
+          icon={<Activity size={17} />}
+        />
+
+        <MetricCard
+          label="Maximum drawdown"
+          value={formatPercent(metrics.max_drawdown_pct)}
+          description="Largest peak-to-trough decline"
+          icon={<TrendingDown size={17} />}
+        />
+      </div>
+
+      {/* Historical NAV chart */}
+
+      <section className="fund-chart-section">
+        <div className="dashboard-section-heading">
+          <div>
+            <span className="eyebrow">NAV HISTORY</span>
+            <h4>Historical NAV movement</h4>
+            <p>
+              Daily NAV observations across the available date range.
+            </p>
+          </div>
+
+          <div className="chart-legend">
+            <span className="legend-dot" />
+            Historical NAV
+          </div>
+        </div>
+
+        {chartData.length > 0 ? (
+          <div className="nav-chart">
+            <ResponsiveContainer
+              width="100%"
+              height={320}
+              minWidth={0}
+            >
+              <LineChart
+                data={chartData}
+                margin={{
+                  top: 12,
+                  right: 18,
+                  left: 5,
+                  bottom: 5,
+                }}
+              >
+                <CartesianGrid
+                  stroke="rgba(255,255,255,0.10)"
+                  strokeDasharray="4 5"
+                  vertical={false}
+                />
+
+                <XAxis
+                  dataKey="date"
+                  tickFormatter={(value) =>
+                    formatDate(String(value))
+                  }
+                  tick={{
+                    fill: '#aeb4c5',
+                    fontSize: 10,
+                  }}
+                  axisLine={{
+                    stroke: 'rgba(255,255,255,0.2)',
+                  }}
+                  tickLine={false}
+                  minTickGap={35}
+                  tickMargin={12}
+                />
+
+                <YAxis
+                  domain={['auto', 'auto']}
+                  tick={{
+                    fill: '#aeb4c5',
+                    fontSize: 10,
+                  }}
+                  axisLine={false}
+                  tickLine={false}
+                  tickMargin={10}
+                  width={55}
+                  tickFormatter={(value) =>
+                    Number(value).toFixed(2)
+                  }
+                />
+
+                <Tooltip
+                  contentStyle={{
+                    background: '#17151f',
+                    border: '1px solid rgba(167,120,255,0.3)',
+                    borderRadius: '10px',
+                    color: '#eeeeF5',
+                    fontSize: '12px',
+                  }}
+                  labelStyle={{
+                    color: '#c4a5ff',
+                    marginBottom: '5px',
+                  }}
+                  labelFormatter={(value) =>
+                    formatDate(String(value))
+                  }
+                  formatter={(value) => [
+                    Number(value).toFixed(4),
+                    'NAV',
+                  ]}
+                />
+
+                <Line
+                  type="monotone"
+                  dataKey="nav"
+                  name="NAV"
+                  stroke="#a78bfa"
+                  strokeWidth={2.5}
+                  strokeOpacity={1}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  dot={false}
+                  activeDot={{
+                    r: 5,
+                    fill: '#c4a5ff',
+                    stroke: '#17151f',
+                    strokeWidth: 2,
+                  }}
+                  isAnimationActive={false}
+                  connectNulls
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        ) : (
+          <div className="empty-chart">
+            Historical NAV observations are not available for this fund.
+          </div>
+        )}
+      </section>
+
+      {/* Historical returns */}
+
+      <section className="historical-returns-section">
+        <div className="dashboard-section-heading">
+          <div>
+            <span className="eyebrow">PERIODIC PERFORMANCE</span>
+            <h4>Historical returns</h4>
+            <p>
+              Returns calculated using the available NAV observations.
+            </p>
+          </div>
+        </div>
+
+        <div className="returns-grid">
+          <ReturnCard
+            label="30 observations"
+            value={metrics.return_30_observations_pct}
+            description="Approximately one month of trading observations"
+          />
+
+          <ReturnCard
+            label="90 observations"
+            value={metrics.return_90_observations_pct}
+            description="Approximately three months of trading observations"
+          />
+
+          <ReturnCard
+            label="252 observations"
+            value={metrics.return_252_observations_pct}
+            description="Approximately one year of trading observations"
+          />
+        </div>
+      </section>
+
+      {/* Data quality */}
+
+      <section className="data-quality-section">
+        <div className="dashboard-section-heading">
+          <div>
+            <span className="eyebrow">DATA QUALITY</span>
+            <h4>Dataset overview</h4>
+            <p>
+              Coverage and cleaning information for this fund.
+            </p>
+          </div>
+        </div>
+
+        <div className="quality-grid">
+          <div className="quality-item">
+            <span>Observations</span>
+            <strong>{metrics.observations}</strong>
+          </div>
+
+          <div className="quality-item">
+            <span>Date range</span>
+            <strong className="quality-date">
+              {formatDate(metrics.start_date)} – {formatDate(metrics.end_date)}
+            </strong>
+          </div>
+
+          <div className="quality-item">
+            <span>Original rows</span>
+            <strong>{cleaning?.original_rows ?? '—'}</strong>
+          </div>
+
+          <div className="quality-item">
+            <span>Final rows</span>
+            <strong>{cleaning?.final_rows ?? '—'}</strong>
+          </div>
+
+          <div className="quality-item">
+            <span>Removed rows</span>
+            <strong>{cleaning?.removed_rows ?? '—'}</strong>
+          </div>
+
+          <div className="quality-item">
+            <span>Invalid dates</span>
+            <strong>{cleaning?.invalid_date_rows ?? '—'}</strong>
+          </div>
+
+          <div className="quality-item">
+            <span>Invalid NAV values</span>
+            <strong>{cleaning?.invalid_nav_rows ?? '—'}</strong>
+          </div>
+
+          <div className="quality-item">
+            <span>Non-positive NAV</span>
+            <strong>{cleaning?.non_positive_nav_rows ?? '—'}</strong>
+          </div>
+
+          <div className="quality-item">
+            <span>Duplicate dates</span>
+            <strong>{cleaning?.duplicate_date_rows ?? '—'}</strong>
+          </div>
+        </div>
+
+        {/* Backend warnings */}
+
+        {warnings.length > 0 && (
+          <div className="warnings-panel">
+            <div className="warnings-heading">
+              <AlertTriangle size={16} />
+              <strong>Backend warnings</strong>
+            </div>
+
+            <ul>
+              {warnings.map((warning, index) => (
+                <li key={`${index}-${warning}`}>
+                  {warning}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {warnings.length === 0 && (
+          <div className="no-warnings">
+            <ShieldCheck size={15} />
+            No backend warnings reported for this dataset.
+          </div>
+        )}
+      </section>
+    </article>
+  )
+}
 
 function App() {
   const [files, setFiles] = useState<File[]>([])
   const [results, setResults] = useState<ApiResponse | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [selectedFundIndex, setSelectedFundIndex] = useState(0)
 
-  // Accept CSV, XLS and XLSX files.
+  const funds = Array.isArray(results?.funds)
+    ? results.funds
+    : []
+
+  const selectedFund =
+    funds[selectedFundIndex] ?? funds[0]
+
+  // Add supported files to the upload list.
+
   const addFiles = (selectedFiles: FileList | null) => {
     if (!selectedFiles) return
 
-    const supportedFiles = Array.from(selectedFiles).filter((file) =>
-      /\.(csv|xls|xlsx)$/i.test(file.name),
+    const supportedFiles = Array.from(selectedFiles).filter(
+      (file) => /\.(csv|xls|xlsx)$/i.test(file.name),
     )
 
     setFiles((current) => {
@@ -34,7 +547,9 @@ function App() {
 
       return combined.filter(
         (file, index) =>
-          combined.findIndex((item) => item.name === file.name) === index,
+          combined.findIndex(
+            (item) => item.name === file.name,
+          ) === index,
       )
     })
 
@@ -45,14 +560,16 @@ function App() {
     )
   }
 
-  // Remove an individual file.
+  // Remove a selected file.
+
   const removeFile = (fileName: string) => {
     setFiles((current) =>
       current.filter((file) => file.name !== fileName),
     )
   }
 
-  // Upload selected files to the FastAPI backend.
+  // Send files to the backend.
+
   const analyzeFiles = async () => {
     if (files.length === 0) {
       setError('Please select at least one supported fund file.')
@@ -62,6 +579,7 @@ function App() {
     setLoading(true)
     setError('')
     setResults(null)
+    setSelectedFundIndex(0)
 
     try {
       const formData = new FormData()
@@ -78,14 +596,19 @@ function App() {
       const data = await response.json()
 
       if (!response.ok) {
+        const detail = data.detail
+
         throw new Error(
-          typeof data.detail === 'string'
-            ? data.detail
-            : 'The analysis request failed.',
+          typeof detail === 'string'
+            ? detail
+            : detail?.message || 'The analysis request failed.',
         )
       }
 
-      setResults(data as ApiResponse)
+      const apiResults = data as ApiResponse
+
+      setResults(apiResults)
+      setSelectedFundIndex(0)
     } catch (err) {
       setError(
         err instanceof Error
@@ -97,16 +620,11 @@ function App() {
     }
   }
 
-  // Determine the number of funds returned by the backend.
-  const resultCount = Array.isArray(results?.funds)
-    ? results.funds.length
-    : Array.isArray(results?.results)
-      ? results.results.length
-      : 0
-
   return (
     <div className="app-shell">
-      {/* Sidebar */}
+
+      {/* LEFT SIDEBAR */}
+
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-icon">
@@ -114,7 +632,7 @@ function App() {
           </div>
 
           <div>
-            <h1>Operation-NAV</h1>
+            <h1>Fund Board</h1>
             <span>Fund intelligence workspace</span>
           </div>
         </div>
@@ -126,12 +644,45 @@ function App() {
             <Layers3 size={18} />
             <span>Fund analysis</span>
           </div>
-
-          <div className="nav-item">
-            <Activity size={18} />
-            <span>Forecast insights</span>
-          </div>
         </div>
+
+        {/* DYNAMIC FUND NAVIGATION */}
+
+        {funds.length > 0 && (
+          <div className="sidebar-funds">
+            <div className="sidebar-funds-heading">
+              <p className="section-label">ANALYZED FUNDS</p>
+              <span>{funds.length}</span>
+            </div>
+
+            <div className="fund-nav-list">
+              {funds.map((fund, index) => (
+                <button
+                  key={`${fund.source_file || fund.fund_name}-${index}`}
+                  type="button"
+                  className={`fund-nav-item ${
+                    selectedFundIndex === index ? 'selected' : ''
+                  }`}
+                  onClick={() => setSelectedFundIndex(index)}
+                  title={fund.fund_name}
+                >
+                  <span className="fund-nav-number">
+                    {String(index + 1).padStart(2, '0')}
+                  </span>
+
+                  <span className="fund-nav-name">
+                    {fund.fund_name || `Fund ${index + 1}`}
+                  </span>
+
+                  <ChevronRight
+                    className="fund-nav-chevron"
+                    size={15}
+                  />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         <div className="sidebar-footer">
           <div className="status-indicator" />
@@ -143,12 +694,18 @@ function App() {
         </div>
       </aside>
 
-      {/* Main content */}
+      {/* MAIN WORKSPACE */}
+
       <main className="main-content">
-        {/* Header */}
+
+        {/* TOP BAR */}
+
         <header className="topbar">
           <div>
-            <span className="breadcrumb">WORKSPACE / ANALYSIS</span>
+            <span className="breadcrumb">
+              WORKSPACE / ANALYSIS
+            </span>
+
             <h2>Fund analysis</h2>
           </div>
 
@@ -158,7 +715,8 @@ function App() {
           </div>
         </header>
 
-        {/* Welcome section */}
+        {/* WELCOME SECTION */}
+
         <section className="welcome-section">
           <div>
             <div className="eyebrow">
@@ -167,25 +725,30 @@ function App() {
             </div>
 
             <h1>
-              Understand the past.
+              Understand your fund.
               <br />
-              Explore what lies ahead.
+              Explore its history.
             </h1>
 
             <p>
-              Analyze historical mutual fund NAV data and explore
-              independently generated 12-month forecasts.
+              Analyze historical mutual fund NAV data, understand
+              performance, and examine risk across the available
+              observations.
             </p>
           </div>
 
           <div className="welcome-art">
             <div className="art-circle">
-              <ChartNoAxesCombined size={62} strokeWidth={1.1} />
+              <ChartNoAxesCombined
+                size={62}
+                strokeWidth={1.1}
+              />
             </div>
           </div>
         </section>
 
-        {/* File upload section */}
+        {/* FILE UPLOAD SECTION */}
+
         <section className="upload-section">
           <div className="section-heading">
             <div>
@@ -202,7 +765,6 @@ function App() {
             </div>
           </div>
 
-          {/* Drag and drop / file selection */}
           <label
             className="upload-zone"
             onDragOver={(event) => event.preventDefault()}
@@ -229,12 +791,13 @@ function App() {
             <span>or click to browse from your computer</span>
 
             <small>
-              Supported formats: CSV, XLS and XLSX · Required columns: Date
-              and NAV
+              Supported formats: CSV, XLS and XLSX · Required columns:
+              Date and NAV
             </small>
           </label>
 
-          {/* Selected files */}
+          {/* SELECTED FILES */}
+
           {files.length > 0 && (
             <div className="file-list">
               <div className="file-list-heading">
@@ -273,7 +836,6 @@ function App() {
                 </div>
               ))}
 
-              {/* Analyze button */}
               <button
                 className="analyze-button"
                 onClick={analyzeFiles}
@@ -296,7 +858,6 @@ function App() {
             </div>
           )}
 
-          {/* Error message */}
           {error && (
             <div className="error-message">
               {error}
@@ -304,47 +865,96 @@ function App() {
           )}
         </section>
 
-        {/* Backend analysis response */}
+        {/* ANALYSIS RESULTS */}
+
         {results && (
           <section className="results-section">
             <div className="section-heading">
               <div>
-                <span className="eyebrow">ANALYSIS RESPONSE</span>
-                <h3>Analysis completed</h3>
-
+                <span className="eyebrow">ANALYSIS RESULTS</span>
+                <h3>Fund performance overview</h3>
                 <p>
-                  The backend returned a response successfully.
-                  {resultCount > 0 &&
-                    ` ${resultCount} fund records detected.`}
+                  {funds.length}{' '}
+                  {funds.length === 1 ? 'fund' : 'funds'} analyzed
+                  independently using the uploaded NAV data.
                 </p>
               </div>
 
               <div className="success-label">
                 <ShieldCheck size={16} />
-                API success
+                Analysis completed
               </div>
             </div>
 
-            <div className="response-panel">
-              <div className="response-header">
-                <strong>Backend response</strong>
-                <span>JSON</span>
-              </div>
+            {funds.length > 0 && selectedFund ? (
+              <div className="selected-fund-workspace">
 
-              <pre>
-                {JSON.stringify(results, null, 2)}
-              </pre>
-            </div>
+                {/* PRODUCT NAME — DISPLAYED ONCE */}
+
+                {results.product_name && (
+                  <div className="product-heading">
+                    <span className="eyebrow">PRODUCT</span>
+                    <h3>{results.product_name}</h3>
+                  </div>
+                )}
+
+                {/* SELECTED FUND INDICATOR */}
+
+                <div className="selected-fund-heading">
+                  <div>
+                    <span className="eyebrow">
+                      SELECTED FUND ·{' '}
+                      {String(selectedFundIndex + 1).padStart(2, '0')}
+                    </span>
+                  </div>
+
+                  <span className="selected-fund-count">
+                    {selectedFundIndex + 1} of {funds.length}
+                  </span>
+                </div>
+
+                {/* ONLY THE SELECTED FUND IS RENDERED */}
+
+                <FundDashboard fund={selectedFund} />
+              </div>
+            ) : (
+              <div className="empty-results">
+                The backend returned successfully, but no fund analysis
+                records were found in the response.
+              </div>
+            )}
+
+            {/* FILE PROCESSING ERRORS */}
+
+            {results.file_errors &&
+              results.file_errors.length > 0 && (
+                <div className="file-errors-panel">
+                  <strong>
+                    Files that could not be analyzed
+                  </strong>
+
+                  {results.file_errors.map((item, index) => (
+                    <p key={`${item.filename}-${index}`}>
+                      <strong>
+                        {item.filename || 'Unknown file'}:
+                      </strong>{' '}
+                      {item.error || 'An error occurred while processing this file.'}
+                    </p>
+                  ))}
+                </div>
+              )}
           </section>
         )}
 
-        {/* Disclaimer */}
+        {/* FOOTER */}
+
         <footer className="disclaimer">
           <ShieldCheck size={16} />
 
           <span>
-            Forecasts are exploratory estimates, not guarantees or investment
-            recommendations.
+            Historical performance does not guarantee future results.
+            This dashboard is for analysis and informational purposes
+            only, not investment advice.
           </span>
         </footer>
       </main>
