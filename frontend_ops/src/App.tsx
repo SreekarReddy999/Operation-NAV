@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   Activity,
@@ -29,6 +29,11 @@ import {
 import './index.css'
 
 type HistoricalPoint = {
+  date: string
+  nav: number
+}
+
+type ChartPoint = {
   date: string
   nav: number
 }
@@ -65,6 +70,10 @@ type FundResult = {
   metrics: FundMetrics
   warnings: string[]
   cleaning: CleaningStats
+}
+
+type PreparedFund = FundResult & {
+  chartData: ChartPoint[]
 }
 
 type ApiResponse = {
@@ -176,28 +185,17 @@ function ReturnCard({
   )
 }
 
-function FundDashboard({
+// Memoized dashboard: only renders again when its fund changes.
+
+const FundDashboard = memo(function FundDashboard({
   fund,
 }: {
-  fund: FundResult
+  fund: PreparedFund
 }) {
   const metrics = fund.metrics
-  const historical = fund.historical ?? []
   const warnings = fund.warnings ?? []
   const cleaning = fund.cleaning
-
-  // Normalize API values before passing them to Recharts.
-  // This protects the chart if NAV values arrive as numeric strings.
-  const chartData = historical
-    .map((point) => ({
-      date: String(point.date ?? ''),
-      nav: Number(point.nav),
-    }))
-    .filter(
-      (point) =>
-        point.date.length > 0 &&
-        Number.isFinite(point.nav),
-    )
+  const chartData = fund.chartData
 
   const latestIsPositive = metrics.total_return_pct >= 0
 
@@ -517,7 +515,7 @@ function FundDashboard({
       </section>
     </article>
   )
-}
+})
 
 function App() {
   const [files, setFiles] = useState<File[]>([])
@@ -530,8 +528,36 @@ function App() {
     ? results.funds
     : []
 
+  // Prepare and cache chart data for every fund.
+  // The cache is rebuilt only when the analysis results change.
+  const preparedFunds = useMemo<PreparedFund[]>(() => {
+    return funds.map((fund) => {
+      const chartData = (fund.historical ?? [])
+        .map((point) => ({
+          date: String(point.date ?? ''),
+          nav: Number(point.nav),
+        }))
+        .filter(
+          (point) =>
+            point.date.length > 0 &&
+            Number.isFinite(point.nav),
+        )
+
+      return {
+        ...fund,
+        chartData,
+      }
+    })
+  }, [funds])
+
   const selectedFund =
-    funds[selectedFundIndex] ?? funds[0]
+    preparedFunds[selectedFundIndex] ?? preparedFunds[0]
+
+  // Clear the previous analysis when the input files change.
+  const invalidateAnalysis = () => {
+    setResults(null)
+    setSelectedFundIndex(0)
+  }
 
   // Add supported files to the upload list.
 
@@ -542,13 +568,19 @@ function App() {
       (file) => /\.(csv|xls|xlsx)$/i.test(file.name),
     )
 
+    if (supportedFiles.length > 0) {
+      invalidateAnalysis()
+    }
+
     setFiles((current) => {
       const combined = [...current, ...supportedFiles]
 
       return combined.filter(
         (file, index) =>
           combined.findIndex(
-            (item) => item.name === file.name,
+            (item) =>
+              item.name === file.name &&
+              item.size === file.size,
           ) === index,
       )
     })
@@ -566,6 +598,18 @@ function App() {
     setFiles((current) =>
       current.filter((file) => file.name !== fileName),
     )
+
+    invalidateAnalysis()
+    setError('')
+  }
+
+  // Clear the entire workspace and its cached analysis.
+
+  const clearWorkspace = () => {
+    setFiles([])
+    setResults(null)
+    setSelectedFundIndex(0)
+    setError('')
   }
 
   // Send files to the backend.
@@ -805,7 +849,7 @@ function App() {
 
                 <button
                   className="text-button"
-                  onClick={() => setFiles([])}
+                  onClick={clearWorkspace}
                   type="button"
                 >
                   Clear all
