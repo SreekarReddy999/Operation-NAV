@@ -88,6 +88,83 @@ type ApiResponse = {
   disclaimer?: string
 }
 
+// Keep the chart reasonably light without changing the underlying analysis.
+// First and last observations are always retained. Each bucket also retains
+// its lowest and highest NAV values to preserve visible peaks and troughs.
+
+const MAX_CHART_POINTS = 1000
+
+function prepareChartData(
+  historical: HistoricalPoint[],
+): ChartPoint[] {
+  const validPoints = historical
+    .map((point) => ({
+      date: String(point.date ?? ''),
+      nav: Number(point.nav),
+    }))
+    .filter(
+      (point) =>
+        point.date.length > 0 &&
+        Number.isFinite(point.nav),
+    )
+
+  if (validPoints.length <= MAX_CHART_POINTS) {
+    return validPoints
+  }
+
+  const first = validPoints[0]
+  const last = validPoints[validPoints.length - 1]
+
+  const bucketCount = Math.floor(
+    (MAX_CHART_POINTS - 2) / 2,
+  )
+
+  const bucketSize = Math.ceil(
+    (validPoints.length - 2) / bucketCount,
+  )
+
+  const sampled: ChartPoint[] = [first]
+
+  for (
+    let start = 1;
+    start < validPoints.length - 1;
+    start += bucketSize
+  ) {
+    const end = Math.min(
+      start + bucketSize,
+      validPoints.length - 1,
+    )
+
+    let minimumIndex = start
+    let maximumIndex = start
+
+    for (let index = start + 1; index < end; index += 1) {
+      if (validPoints[index].nav < validPoints[minimumIndex].nav) {
+        minimumIndex = index
+      }
+
+      if (validPoints[index].nav > validPoints[maximumIndex].nav) {
+        maximumIndex = index
+      }
+    }
+
+    // Preserve the chronological order of the selected extremes.
+    if (minimumIndex < maximumIndex) {
+      sampled.push(validPoints[minimumIndex])
+      sampled.push(validPoints[maximumIndex])
+    } else if (maximumIndex < minimumIndex) {
+      sampled.push(validPoints[maximumIndex])
+      sampled.push(validPoints[minimumIndex])
+    } else {
+      sampled.push(validPoints[minimumIndex])
+    }
+  }
+
+  sampled.push(last)
+
+  return sampled
+}
+
 function formatNumber(
   value: number | null | undefined,
   decimals = 2,
@@ -185,7 +262,8 @@ function ReturnCard({
   )
 }
 
-// Memoized dashboard: only renders again when its fund changes.
+// Memoized dashboard. Each fund stays mounted after analysis,
+// so switching tabs does not repeatedly recreate its chart.
 
 const FundDashboard = memo(function FundDashboard({
   fund,
@@ -218,8 +296,6 @@ const FundDashboard = memo(function FundDashboard({
           {metrics.observations} observations
         </div>
       </div>
-
-      {/* Key fund metrics */}
 
       <div className="metrics-grid">
         <MetricCard
@@ -269,8 +345,6 @@ const FundDashboard = memo(function FundDashboard({
         />
       </div>
 
-      {/* Historical NAV chart */}
-
       <section className="fund-chart-section">
         <div className="dashboard-section-heading">
           <div>
@@ -288,110 +362,118 @@ const FundDashboard = memo(function FundDashboard({
         </div>
 
         {chartData.length > 0 ? (
-          <div className="nav-chart">
-            <ResponsiveContainer
-              width="100%"
-              height={320}
-              minWidth={0}
-            >
-              <LineChart
-                data={chartData}
-                margin={{
-                  top: 12,
-                  right: 18,
-                  left: 5,
-                  bottom: 5,
-                }}
+          <>
+            <div className="nav-chart">
+              <ResponsiveContainer
+                width="100%"
+                height={320}
+                minWidth={0}
               >
-                <CartesianGrid
-                  stroke="rgba(255,255,255,0.10)"
-                  strokeDasharray="4 5"
-                  vertical={false}
-                />
+                <LineChart
+                  data={chartData}
+                  margin={{
+                    top: 12,
+                    right: 18,
+                    left: 5,
+                    bottom: 5,
+                  }}
+                >
+                  <CartesianGrid
+                    stroke="rgba(255,255,255,0.10)"
+                    strokeDasharray="4 5"
+                    vertical={false}
+                  />
 
-                <XAxis
-                  dataKey="date"
-                  tickFormatter={(value) =>
-                    formatDate(String(value))
-                  }
-                  tick={{
-                    fill: '#aeb4c5',
-                    fontSize: 10,
-                  }}
-                  axisLine={{
-                    stroke: 'rgba(255,255,255,0.2)',
-                  }}
-                  tickLine={false}
-                  minTickGap={35}
-                  tickMargin={12}
-                />
+                  <XAxis
+                    dataKey="date"
+                    tickFormatter={(value) =>
+                      formatDate(String(value))
+                    }
+                    tick={{
+                      fill: '#aeb4c5',
+                      fontSize: 10,
+                    }}
+                    axisLine={{
+                      stroke: 'rgba(255,255,255,0.2)',
+                    }}
+                    tickLine={false}
+                    minTickGap={35}
+                    tickMargin={12}
+                  />
 
-                <YAxis
-                  domain={['auto', 'auto']}
-                  tick={{
-                    fill: '#aeb4c5',
-                    fontSize: 10,
-                  }}
-                  axisLine={false}
-                  tickLine={false}
-                  tickMargin={10}
-                  width={55}
-                  tickFormatter={(value) =>
-                    Number(value).toFixed(2)
-                  }
-                />
+                  <YAxis
+                    domain={['auto', 'auto']}
+                    tick={{
+                      fill: '#aeb4c5',
+                      fontSize: 10,
+                    }}
+                    axisLine={false}
+                    tickLine={false}
+                    tickMargin={10}
+                    width={55}
+                    tickFormatter={(value) =>
+                      Number(value).toFixed(2)
+                    }
+                  />
 
-                <Tooltip
-                  contentStyle={{
-                    background: '#17151f',
-                    border: '1px solid rgba(167,120,255,0.3)',
-                    borderRadius: '10px',
-                    color: '#eeeeF5',
-                    fontSize: '12px',
-                  }}
-                  labelStyle={{
-                    color: '#c4a5ff',
-                    marginBottom: '5px',
-                  }}
-                  labelFormatter={(value) =>
-                    formatDate(String(value))
-                  }
-                  formatter={(value) => [
-                    Number(value).toFixed(4),
-                    'NAV',
-                  ]}
-                />
+                  <Tooltip
+                    contentStyle={{
+                      background: '#17151f',
+                      border: '1px solid rgba(167,120,255,0.3)',
+                      borderRadius: '10px',
+                      color: '#eeeeF5',
+                      fontSize: '12px',
+                    }}
+                    labelStyle={{
+                      color: '#c4a5ff',
+                      marginBottom: '5px',
+                    }}
+                    labelFormatter={(value) =>
+                      formatDate(String(value))
+                    }
+                    formatter={(value) => [
+                      Number(value).toFixed(4),
+                      'NAV',
+                    ]}
+                  />
 
-                <Line
-                  type="monotone"
-                  dataKey="nav"
-                  name="NAV"
-                  stroke="#a78bfa"
-                  strokeWidth={2.5}
-                  strokeOpacity={1}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  dot={false}
-                  activeDot={{
-                    r: 5,
-                    fill: '#c4a5ff',
-                    stroke: '#17151f',
-                    strokeWidth: 2,
-                  }}
-                  isAnimationActive={false}
-                  connectNulls
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
+                  <Line
+                    type="monotone"
+                    dataKey="nav"
+                    name="NAV"
+                    stroke="#a78bfa"
+                    strokeWidth={2.5}
+                    strokeOpacity={1}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    dot={false}
+                    activeDot={{
+                      r: 5,
+                      fill: '#c4a5ff',
+                      stroke: '#17151f',
+                      strokeWidth: 2,
+                    }}
+                    isAnimationActive={false}
+                    connectNulls
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+
+            {metrics.observations > chartData.length && (
+              <p className="chart-sampling-note">
+                Chart display simplified to {chartData.length.toLocaleString('en-IN')} points
+                from {metrics.observations.toLocaleString('en-IN')} observations.
+                All performance metrics use the full dataset.
+              </p>
+            )}
+          </>
         ) : (
           <div className="empty-chart">
             Historical NAV observations are not available for this fund.
           </div>
         )}
       </section>
-
-      {/* Historical returns */}
 
       <section className="historical-returns-section">
         <div className="dashboard-section-heading">
@@ -424,8 +506,6 @@ const FundDashboard = memo(function FundDashboard({
           />
         </div>
       </section>
-
-      {/* Data quality */}
 
       <section className="data-quality-section">
         <div className="dashboard-section-heading">
@@ -487,8 +567,6 @@ const FundDashboard = memo(function FundDashboard({
           </div>
         </div>
 
-        {/* Backend warnings */}
-
         {warnings.length > 0 && (
           <div className="warnings-panel">
             <div className="warnings-heading">
@@ -528,38 +606,23 @@ function App() {
     ? results.funds
     : []
 
-  // Prepare and cache chart data for every fund.
-  // The cache is rebuilt only when the analysis results change.
-  const preparedFunds = useMemo<PreparedFund[]>(() => {
-    return funds.map((fund) => {
-      const chartData = (fund.historical ?? [])
-        .map((point) => ({
-          date: String(point.date ?? ''),
-          nav: Number(point.nav),
-        }))
-        .filter(
-          (point) =>
-            point.date.length > 0 &&
-            Number.isFinite(point.nav),
-        )
+  // Prepare and downsample each fund's chart data once per analysis.
+  // These references remain stable while switching between funds.
 
-      return {
-        ...fund,
-        chartData,
-      }
-    })
+  const preparedFunds = useMemo<PreparedFund[]>(() => {
+    return funds.map((fund) => ({
+      ...fund,
+      chartData: prepareChartData(fund.historical ?? []),
+    }))
   }, [funds])
 
   const selectedFund =
     preparedFunds[selectedFundIndex] ?? preparedFunds[0]
 
-  // Clear the previous analysis when the input files change.
   const invalidateAnalysis = () => {
     setResults(null)
     setSelectedFundIndex(0)
   }
-
-  // Add supported files to the upload list.
 
   const addFiles = (selectedFiles: FileList | null) => {
     if (!selectedFiles) return
@@ -592,8 +655,6 @@ function App() {
     )
   }
 
-  // Remove a selected file.
-
   const removeFile = (fileName: string) => {
     setFiles((current) =>
       current.filter((file) => file.name !== fileName),
@@ -603,16 +664,12 @@ function App() {
     setError('')
   }
 
-  // Clear the entire workspace and its cached analysis.
-
   const clearWorkspace = () => {
     setFiles([])
     setResults(null)
     setSelectedFundIndex(0)
     setError('')
   }
-
-  // Send files to the backend.
 
   const analyzeFiles = async () => {
     if (files.length === 0) {
@@ -666,9 +723,6 @@ function App() {
 
   return (
     <div className="app-shell">
-
-      {/* LEFT SIDEBAR */}
-
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-icon">
@@ -689,8 +743,6 @@ function App() {
             <span>Fund analysis</span>
           </div>
         </div>
-
-        {/* DYNAMIC FUND NAVIGATION */}
 
         {funds.length > 0 && (
           <div className="sidebar-funds">
@@ -738,12 +790,7 @@ function App() {
         </div>
       </aside>
 
-      {/* MAIN WORKSPACE */}
-
       <main className="main-content">
-
-        {/* TOP BAR */}
-
         <header className="topbar">
           <div>
             <span className="breadcrumb">
@@ -758,8 +805,6 @@ function App() {
             Backend connected
           </div>
         </header>
-
-        {/* WELCOME SECTION */}
 
         <section className="welcome-section">
           <div>
@@ -790,8 +835,6 @@ function App() {
             </div>
           </div>
         </section>
-
-        {/* FILE UPLOAD SECTION */}
 
         <section className="upload-section">
           <div className="section-heading">
@@ -839,8 +882,6 @@ function App() {
               Date and NAV
             </small>
           </label>
-
-          {/* SELECTED FILES */}
 
           {files.length > 0 && (
             <div className="file-list">
@@ -909,8 +950,6 @@ function App() {
           )}
         </section>
 
-        {/* ANALYSIS RESULTS */}
-
         {results && (
           <section className="results-section">
             <div className="section-heading">
@@ -932,17 +971,12 @@ function App() {
 
             {funds.length > 0 && selectedFund ? (
               <div className="selected-fund-workspace">
-
-                {/* PRODUCT NAME — DISPLAYED ONCE */}
-
                 {results.product_name && (
                   <div className="product-heading">
                     <span className="eyebrow">PRODUCT</span>
                     <h3>{results.product_name}</h3>
                   </div>
                 )}
-
-                {/* SELECTED FUND INDICATOR */}
 
                 <div className="selected-fund-heading">
                   <div>
@@ -957,9 +991,25 @@ function App() {
                   </span>
                 </div>
 
-                {/* ONLY THE SELECTED FUND IS RENDERED */}
+                {/* All dashboards stay mounted. Only visibility changes. */}
 
-                <FundDashboard fund={selectedFund} />
+                <div className="fund-dashboard-stack">
+                  {preparedFunds.map((fund, index) => {
+                    const isSelected = index === selectedFundIndex
+
+                    return (
+                      <div
+                        key={`${fund.source_file || fund.fund_name}-${index}`}
+                        className={`fund-dashboard-panel ${
+                          isSelected ? 'is-active' : 'is-inactive'
+                        }`}
+                        aria-hidden={!isSelected}
+                      >
+                        <FundDashboard fund={fund} />
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
             ) : (
               <div className="empty-results">
@@ -967,8 +1017,6 @@ function App() {
                 records were found in the response.
               </div>
             )}
-
-            {/* FILE PROCESSING ERRORS */}
 
             {results.file_errors &&
               results.file_errors.length > 0 && (
@@ -989,8 +1037,6 @@ function App() {
               )}
           </section>
         )}
-
-        {/* FOOTER */}
 
         <footer className="disclaimer">
           <ShieldCheck size={16} />
