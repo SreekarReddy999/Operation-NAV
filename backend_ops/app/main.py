@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi.openapi.utils import get_openapi
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 
 from app.core.csv_processor import CSVValidationError, parse_fund_file
 from app.core.forecast_engine import analyse_funds
@@ -22,7 +22,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -31,15 +34,19 @@ app.add_middleware(
 
 @app.get("/api/v1/health")
 def health():
-    return {"status": "ok", "service": "fund-nav-analysis-api", "version": "0.1.0"}
+    return {
+        "status": "ok",
+        "service": "fund-nav-analysis-api",
+        "version": "0.1.0",
+    }
 
 
 @app.post("/api/v1/analyze")
 async def analyze_fund_files(
-        files: Annotated[
-            list[UploadFile],
-            File(description="Upload one CSV, XLS, or XLSX file per fund."),
-        ],
+    files: Annotated[
+        list[UploadFile],
+        File(description="Upload one CSV, XLS, or XLSX file per fund."),
+    ],
 ):
     if not files:
         raise HTTPException(
@@ -111,8 +118,20 @@ async def analyze_fund_files(
             detail=f"Fund analysis failed: {exc}",
         ) from exc
 
+    # Product name is common report metadata.
+    # Use the first available non-empty product name.
+    product_name = next(
+        (
+            parsed.product_name
+            for parsed in parsed_funds
+            if parsed.product_name
+        ),
+        None,
+    )
+
     return {
         "application": "Fund NAV Analysis",
+        "product_name": product_name,
         "fund_count": len(results),
         "chart_contract": {
             "one_result_per_fund": True,
@@ -142,7 +161,7 @@ def custom_openapi():
         routes=app.routes,
     )
 
-    # Use OpenAPI 3.0.3 for Swagger UI file-upload compatibility
+    # Use OpenAPI 3.0.3 for Swagger UI file-upload compatibility.
     schema["openapi"] = "3.0.3"
 
     components = schema.get("components", {}).get("schemas", {})
@@ -151,15 +170,14 @@ def custom_openapi():
         properties = component.get("properties", {})
 
         for prop in properties.values():
-
-            # Handle arrays of uploaded files
+            # Handle arrays of uploaded files.
             items = prop.get("items", {})
 
             if items.get("contentMediaType") == "application/octet-stream":
                 items.pop("contentMediaType", None)
                 items["format"] = "binary"
 
-            # Handle individual uploaded files
+            # Handle individual uploaded files.
             if prop.get("contentMediaType") == "application/octet-stream":
                 prop.pop("contentMediaType", None)
                 prop["format"] = "binary"

@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import io
@@ -16,8 +17,6 @@ import pandas as pd
 SUPPORTED_EXTENSIONS = {".csv", ".xls", ".xlsx"}
 
 # 0 means the first worksheet.
-# If your production workbook has a known sheet name, you can
-# replace 0 with that exact sheet name.
 NAV_SHEET_NAME = 0
 
 MIN_RECOMMENDED_OBSERVATIONS = 252
@@ -57,6 +56,7 @@ class ParsedFund:
     data: pd.DataFrame
     warnings: list[str]
     cleaning: dict[str, Any]
+    product_name: str | None = None
 
 
 # ---------------------------------------------------------
@@ -68,7 +68,6 @@ def normalize_text(value: Any) -> str:
     Normalize header text by removing spaces and special
     characters and converting it to lowercase.
     """
-
     if pd.isna(value):
         return ""
 
@@ -83,6 +82,55 @@ def normalise_header(value: Any) -> str:
 
 
 # ---------------------------------------------------------
+# SBI report metadata extraction
+# ---------------------------------------------------------
+
+def extract_report_field(
+    raw_df: pd.DataFrame,
+    field_name: str,
+) -> str | None:
+    """
+    Extract a report-header value located to the right of
+    a label such as Product or Fund.
+    """
+    target = normalize_text(field_name)
+
+    for _, row in raw_df.iterrows():
+        values = row.tolist()
+
+        for col_index, value in enumerate(values):
+            if normalize_text(value) != target:
+                continue
+
+            # Find the next non-empty cell to the right.
+            for next_value in values[col_index + 1:]:
+                if pd.notna(next_value):
+                    extracted = str(next_value).strip()
+
+                    if extracted:
+                        return extracted
+
+    return None
+
+
+def extract_report_metadata(
+    raw_df: pd.DataFrame,
+) -> tuple[str, str | None]:
+    """
+    Extract the Fund and Product names from the SBI report header.
+    """
+    fund_name = extract_report_field(raw_df, "Fund")
+    product_name = extract_report_field(raw_df, "Product")
+
+    if not fund_name:
+        raise CSVValidationError(
+            "Could not find the Fund name in the Excel report header."
+        )
+
+    return fund_name, product_name
+
+
+# ---------------------------------------------------------
 # CSV reader
 # ---------------------------------------------------------
 
@@ -90,7 +138,6 @@ def _read_csv_bytes(content: bytes) -> pd.DataFrame:
     """
     Read CSV content while trying common file encodings.
     """
-
     encodings = [
         "utf-8-sig",
         "utf-8",
@@ -131,11 +178,9 @@ def read_sbi_raw(
     Read an Excel worksheet without assuming that the
     first row contains the actual column headers.
 
-    This supports report-style SBI Excel files where
-    titles, blank rows or report information appear
-    before the NAV table.
+    Supports report-style SBI Excel files where titles,
+    blank rows or report information appear before the NAV table.
     """
-
     extension = Path(filename).suffix.lower()
 
     if extension == ".xls":
@@ -181,7 +226,6 @@ def find_nav_header_row(raw_df: pd.DataFrame):
 
     Returns the matching row index, or None if not found.
     """
-
     for index, row in raw_df.iterrows():
 
         normalized_values = {
@@ -216,7 +260,6 @@ def extract_nav_table(
     Extract only the date and NAV columns from the
     detected header row onwards.
     """
-
     header = raw_df.iloc[header_row]
 
     date_columns = []
@@ -261,18 +304,22 @@ def extract_nav_table(
 def _read_excel_bytes(
     content: bytes,
     filename: str,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, str, str | None]:
     """
-    Read the configured worksheet, detect the real NAV
-    header row, and return the extracted NAV table.
+    Read the configured worksheet, extract report metadata,
+    detect the NAV header row, and return the NAV table,
+    fund name and product name.
     """
-
     raw_df = read_sbi_raw(
         content=content,
         filename=filename,
         sheet_name=NAV_SHEET_NAME,
     )
 
+    # Extract Product and Fund names from the report header.
+    fund_name, product_name = extract_report_metadata(raw_df)
+
+    # Locate the actual NAV table.
     header_row = find_nav_header_row(raw_df)
 
     if header_row is None:
@@ -282,10 +329,12 @@ def _read_excel_bytes(
             "Please check the selected worksheet."
         )
 
-    return extract_nav_table(
+    nav_df = extract_nav_table(
         raw_df=raw_df,
         header_row=header_row,
     )
+
+    return nav_df, fund_name, product_name
 
 
 # ---------------------------------------------------------
@@ -295,12 +344,11 @@ def _read_excel_bytes(
 def _read_fund_file(
     content: bytes,
     filename: str,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, str | None, str | None]:
     """
     Read CSV, XLS or XLSX and return a DataFrame
-    containing date and nav columns.
+    containing date and NAV columns, along with metadata.
     """
-
     extension = Path(filename).suffix.lower()
 
     if extension == ".csv":
@@ -338,7 +386,7 @@ def _read_fund_file(
 
         nav_df.columns = ["date", "nav"]
 
-        return nav_df
+        return nav_df, None, None
 
     if extension in {".xls", ".xlsx"}:
         return _read_excel_bytes(
@@ -361,7 +409,6 @@ def _clean_nav_values(nav_series: pd.Series) -> pd.Series:
     Remove common currency formatting before converting
     NAV values into numeric values.
     """
-
     cleaned = (
         nav_series.astype("string")
         .str.strip()
@@ -400,7 +447,6 @@ def parse_fund_file(
     - nav
     - source_file
     """
-
     extension = Path(filename).suffix.lower()
 
     if extension not in SUPPORTED_EXTENSIONS:
@@ -415,7 +461,7 @@ def parse_fund_file(
         )
 
     try:
-        nav_df = _read_fund_file(
+        nav_df, extracted_fund_name, product_name = _read_fund_file(
             content=content,
             filename=filename,
         )
@@ -512,7 +558,9 @@ def parse_fund_file(
     # Standardized fund information
     # -----------------------------------------------------
 
-    fund_name = Path(filename).stem
+    # Excel: use the actual Fund name from the report.
+    # CSV: retain the existing filename-based behavior.
+    fund_name = extracted_fund_name or Path(filename).stem
 
     nav_df["fund_name"] = fund_name
     nav_df["source_file"] = filename
@@ -568,6 +616,7 @@ def parse_fund_file(
         data=nav_df,
         warnings=warnings,
         cleaning=cleaning,
+        product_name=product_name,
     )
 
 
@@ -583,7 +632,6 @@ def parse_fund_csv(
     Preserve compatibility with existing code that calls
     parse_fund_csv(). This wrapper accepts CSV files only.
     """
-
     if Path(filename).suffix.lower() != ".csv":
         raise CSVValidationError(
             f"{filename}: parse_fund_csv() accepts CSV files only. "
