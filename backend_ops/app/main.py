@@ -6,7 +6,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.core.csv_processor import CSVValidationError, parse_fund_csv
+from app.core.csv_processor import CSVValidationError, parse_fund_file
 from app.core.forecast_engine import analyse_funds
 
 
@@ -14,8 +14,9 @@ app = FastAPI(
     title="Fund NAV Analysis API",
     version="0.1.0",
     description=(
-        "Accepts one CSV per fund (Date and NAV columns), analyses each fund, "
-        "and returns separate historical and 12-month forecast chart series."
+        "Accepts one CSV, XLS, or XLSX file per fund (Date and NAV columns), "
+        "analyses each fund independently, and returns separate historical "
+        "and 12-month forecast chart series."
     ),
 )
 
@@ -35,36 +36,59 @@ def health():
 
 @app.post("/api/v1/analyze")
 async def analyze_fund_files(
-    files: Annotated[list[UploadFile], File(description="Upload one CSV file per fund.")],
+        files: Annotated[
+            list[UploadFile],
+            File(description="Upload one CSV, XLS, or XLSX file per fund."),
+        ],
 ):
     if not files:
-        raise HTTPException(status_code=400, detail="Upload at least one fund CSV file.")
+        raise HTTPException(
+            status_code=400,
+            detail="Upload at least one fund file.",
+        )
 
     parsed_funds = []
     file_errors = []
 
     for upload in files:
-        filename = upload.filename or "unnamed.csv"
-        content = await upload.read()
-
-        if len(content) > 25 * 1024 * 1024:
-            file_errors.append({
-                "filename": filename,
-                "error": "File exceeds the 25 MB upload limit.",
-            })
-            continue
+        filename = upload.filename or "unnamed_file"
 
         try:
-            parsed_funds.append(parse_fund_csv(content, filename))
+            content = await upload.read()
+
+            if len(content) > 25 * 1024 * 1024:
+                file_errors.append({
+                    "filename": filename,
+                    "error": "File exceeds the 25 MB upload limit.",
+                })
+                continue
+
+            parsed_funds.append(
+                parse_fund_file(content, filename)
+            )
+
         except CSVValidationError as exc:
-            file_errors.append({"filename": filename, "error": str(exc)})
+            file_errors.append({
+                "filename": filename,
+                "error": str(exc),
+            })
+
+        except Exception as exc:
+            file_errors.append({
+                "filename": filename,
+                "error": f"Unexpected processing error: {exc}",
+            })
+
         finally:
             await upload.close()
 
     if not parsed_funds:
         raise HTTPException(
             status_code=400,
-            detail={"message": "No valid fund CSV files were supplied.", "file_errors": file_errors},
+            detail={
+                "message": "No valid fund files were supplied.",
+                "file_errors": file_errors,
+            },
         )
 
     funds_for_analysis = [
@@ -80,8 +104,12 @@ async def analyze_fund_files(
 
     try:
         results = analyse_funds(funds_for_analysis)
+
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Fund analysis failed: {exc}") from exc
+        raise HTTPException(
+            status_code=500,
+            detail=f"Fund analysis failed: {exc}",
+        ) from exc
 
     return {
         "application": "Fund NAV Analysis",
@@ -96,10 +124,12 @@ async def analyze_fund_files(
         "funds": results,
         "file_errors": file_errors,
         "disclaimer": (
-            "Forecasts are estimates, not guarantees or investment recommendations. "
-            "Historical performance does not guarantee future results."
+            "Forecasts are estimates, not guarantees or investment "
+            "recommendations. Historical performance does not "
+            "guarantee future results."
         ),
     }
+
 
 def custom_openapi():
     if app.openapi_schema:

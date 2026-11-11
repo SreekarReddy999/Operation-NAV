@@ -1,16 +1,54 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from io import BytesIO
-from pathlib import Path
+import io
 import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
 
-class CSVValidationError(ValueError):
-    """Raised when an uploaded fund CSV cannot be used."""
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
 
+SUPPORTED_EXTENSIONS = {".csv", ".xls", ".xlsx"}
+
+# 0 means the first worksheet.
+# If your production workbook has a known sheet name, you can
+# replace 0 with that exact sheet name.
+NAV_SHEET_NAME = 0
+
+MIN_RECOMMENDED_OBSERVATIONS = 252
+
+DATE_ALIASES = {
+    "date",
+    "effectivedate",
+    "navdate",
+    "valuedate",
+    "asofdate",
+}
+
+NAV_ALIASES = {
+    "nav",
+    "navvalue",
+    "netassetvalue",
+    "unitnav",
+}
+
+
+# ---------------------------------------------------------
+# Custom exception
+# ---------------------------------------------------------
+
+class CSVValidationError(Exception):
+    """Raised when an uploaded fund file cannot be validated."""
+
+
+# ---------------------------------------------------------
+# Parsed output structure
+# ---------------------------------------------------------
 
 @dataclass
 class ParsedFund:
@@ -18,132 +56,541 @@ class ParsedFund:
     source_file: str
     data: pd.DataFrame
     warnings: list[str]
-    cleaning: dict[str, int]
+    cleaning: dict[str, Any]
 
 
-def _normalise_header(value: object) -> str:
-    return re.sub(r"[^a-z0-9]", "", str(value).strip().lower())
+# ---------------------------------------------------------
+# Text and header normalization
+# ---------------------------------------------------------
+
+def normalize_text(value: Any) -> str:
+    """
+    Normalize header text by removing spaces and special
+    characters and converting it to lowercase.
+    """
+
+    if pd.isna(value):
+        return ""
+
+    text = str(value).strip().lower()
+
+    return re.sub(r"[^a-z0-9]", "", text)
 
 
-DATE_ALIASES = {
-    "date", "effectivedate", "navdate", "valuedate", "asofdate"
-}
-NAV_ALIASES = {
-    "nav", "navvalue", "netassetvalue", "unitnav"
-}
+def normalise_header(value: Any) -> str:
+    """Backward-compatible alias for header normalization."""
+    return normalize_text(value)
 
+
+# ---------------------------------------------------------
+# CSV reader
+# ---------------------------------------------------------
 
 def _read_csv_bytes(content: bytes) -> pd.DataFrame:
-    if not content:
-        raise CSVValidationError("The uploaded CSV is empty.")
+    """
+    Read CSV content while trying common file encodings.
+    """
+
+    encodings = [
+        "utf-8-sig",
+        "utf-8",
+        "cp1252",
+        "latin1",
+    ]
 
     last_error = None
-    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin1"):
+
+    for encoding in encodings:
         try:
-            return pd.read_csv(BytesIO(content), encoding=encoding)
-        except UnicodeDecodeError as exc:
-            last_error = exc
-        except pd.errors.EmptyDataError as exc:
-            raise CSVValidationError("The uploaded CSV contains no tabular data.") from exc
-        except Exception as exc:
-            last_error = exc
+            return pd.read_csv(
+                io.BytesIO(content),
+                encoding=encoding,
+            )
+        except UnicodeDecodeError as error:
+            last_error = error
+        except pd.errors.EmptyDataError as error:
+            raise CSVValidationError(
+                "The CSV file is empty."
+            ) from error
 
-    raise CSVValidationError(f"Could not read the CSV: {last_error}")
+    raise CSVValidationError(
+        f"Could not decode CSV file. Last error: {last_error}"
+    )
 
 
-def parse_fund_csv(content: bytes, filename: str) -> ParsedFund:
+# ---------------------------------------------------------
+# Excel reader
+# ---------------------------------------------------------
+
+def read_sbi_raw(
+    content: bytes,
+    filename: str,
+    sheet_name=NAV_SHEET_NAME,
+) -> pd.DataFrame:
     """
-    Parse one CSV representing exactly one fund.
+    Read an Excel worksheet without assuming that the
+    first row contains the actual column headers.
 
-    Required logical columns: Date and NAV. Common header variations are accepted.
-    Fund identity is derived from the uploaded filename because the agreed CSV
-    format does not contain a Fund Name column.
+    This supports report-style SBI Excel files where
+    titles, blank rows or report information appear
+    before the NAV table.
     """
-    if Path(filename).suffix.lower() != ".csv":
-        raise CSVValidationError(f"{filename}: only .csv files are supported.")
 
-    raw = _read_csv_bytes(content)
-    if raw.empty:
-        raise CSVValidationError(f"{filename}: the CSV has a header but no data rows.")
+    extension = Path(filename).suffix.lower()
 
-    normalised = [_normalise_header(col) for col in raw.columns]
-    date_positions = [i for i, name in enumerate(normalised) if name in DATE_ALIASES]
-    nav_positions = [i for i, name in enumerate(normalised) if name in NAV_ALIASES]
-
-    if len(date_positions) != 1 or len(nav_positions) != 1:
+    if extension == ".xls":
+        engine = "xlrd"
+    elif extension == ".xlsx":
+        engine = "openpyxl"
+    else:
         raise CSVValidationError(
-            f"{filename}: expected exactly one Date column and one NAV column. "
-            f"Recognised headers include Date/Effective Date and NAV/NAV Value. "
-            f"Found columns: {list(raw.columns)}"
+            f"Unsupported Excel extension: {extension}"
         )
 
-    date_col = raw.columns[date_positions[0]]
-    nav_col = raw.columns[nav_positions[0]]
+    try:
+        raw_df = pd.read_excel(
+            io.BytesIO(content),
+            sheet_name=sheet_name,
+            header=None,
+            engine=engine,
+        )
 
-    frame = raw[[date_col, nav_col]].copy()
-    rows_before = len(frame)
+        if raw_df.empty:
+            raise CSVValidationError(
+                "Workbook sheet is empty."
+            )
 
-    # The Colab notebook uses day-first parsing; retain that convention for Indian NAV exports.
-    frame["date"] = pd.to_datetime(frame[date_col], errors="coerce", dayfirst=True)
+        return raw_df
 
-    nav_text = (
-        frame[nav_col]
-        .astype("string")
+    except CSVValidationError:
+        raise
+    except Exception as error:
+        raise CSVValidationError(
+            f"Failed to read {filename}: {error}"
+        ) from error
+
+
+# ---------------------------------------------------------
+# Excel NAV header detection
+# ---------------------------------------------------------
+
+def find_nav_header_row(raw_df: pd.DataFrame):
+    """
+    Scan every worksheet row and locate the row containing
+    both an effective-date header and a NAV header.
+
+    Returns the matching row index, or None if not found.
+    """
+
+    for index, row in raw_df.iterrows():
+
+        normalized_values = {
+            normalize_text(value)
+            for value in row.tolist()
+            if normalize_text(value)
+        }
+
+        has_date = bool(
+            normalized_values.intersection(DATE_ALIASES)
+        )
+
+        has_nav = bool(
+            normalized_values.intersection(NAV_ALIASES)
+        )
+
+        if has_date and has_nav:
+            return index
+
+    return None
+
+
+# ---------------------------------------------------------
+# Extract NAV table from Excel
+# ---------------------------------------------------------
+
+def extract_nav_table(
+    raw_df: pd.DataFrame,
+    header_row: int,
+) -> pd.DataFrame:
+    """
+    Extract only the date and NAV columns from the
+    detected header row onwards.
+    """
+
+    header = raw_df.iloc[header_row]
+
+    date_columns = []
+    nav_columns = []
+
+    for col_index, value in header.items():
+
+        normalized = normalize_text(value)
+
+        if normalized in DATE_ALIASES:
+            date_columns.append(col_index)
+
+        elif normalized in NAV_ALIASES:
+            nav_columns.append(col_index)
+
+    if len(date_columns) != 1 or len(nav_columns) != 1:
+        raise CSVValidationError(
+            "Could not uniquely identify the Effective Date "
+            "and NAV columns."
+        )
+
+    effective_date_col = date_columns[0]
+    nav_col = nav_columns[0]
+
+    nav_df = raw_df.iloc[header_row + 1:][
+        [effective_date_col, nav_col]
+    ].copy()
+
+    nav_df.columns = ["date", "nav"]
+
+    return (
+        nav_df
+        .dropna(how="all")
+        .reset_index(drop=True)
+    )
+
+
+# ---------------------------------------------------------
+# Read Excel and locate NAV table
+# ---------------------------------------------------------
+
+def _read_excel_bytes(
+    content: bytes,
+    filename: str,
+) -> pd.DataFrame:
+    """
+    Read the configured worksheet, detect the real NAV
+    header row, and return the extracted NAV table.
+    """
+
+    raw_df = read_sbi_raw(
+        content=content,
+        filename=filename,
+        sheet_name=NAV_SHEET_NAME,
+    )
+
+    header_row = find_nav_header_row(raw_df)
+
+    if header_row is None:
+        raise CSVValidationError(
+            f"{filename}: Could not find a row containing "
+            "both an Effective Date and NAV header. "
+            "Please check the selected worksheet."
+        )
+
+    return extract_nav_table(
+        raw_df=raw_df,
+        header_row=header_row,
+    )
+
+
+# ---------------------------------------------------------
+# Common file reader
+# ---------------------------------------------------------
+
+def _read_fund_file(
+    content: bytes,
+    filename: str,
+) -> pd.DataFrame:
+    """
+    Read CSV, XLS or XLSX and return a DataFrame
+    containing date and nav columns.
+    """
+
+    extension = Path(filename).suffix.lower()
+
+    if extension == ".csv":
+
+        raw_df = _read_csv_bytes(content)
+
+        # CSV files are expected to have headers.
+        normalized_headers = {
+            normalize_text(column): column
+            for column in raw_df.columns
+        }
+
+        date_columns = [
+            original
+            for normalized, original in normalized_headers.items()
+            if normalized in DATE_ALIASES
+        ]
+
+        nav_columns = [
+            original
+            for normalized, original in normalized_headers.items()
+            if normalized in NAV_ALIASES
+        ]
+
+        if len(date_columns) != 1 or len(nav_columns) != 1:
+            raise CSVValidationError(
+                f"{filename}: Expected exactly one Date/Effective "
+                f"Date column and one NAV/NAV Value column. "
+                f"Found columns: {list(raw_df.columns)}"
+            )
+
+        nav_df = raw_df[
+            [date_columns[0], nav_columns[0]]
+        ].copy()
+
+        nav_df.columns = ["date", "nav"]
+
+        return nav_df
+
+    if extension in {".xls", ".xlsx"}:
+        return _read_excel_bytes(
+            content=content,
+            filename=filename,
+        )
+
+    raise CSVValidationError(
+        f"{filename}: Unsupported file format. "
+        "Supported formats are CSV, XLS and XLSX."
+    )
+
+
+# ---------------------------------------------------------
+# NAV value cleaning
+# ---------------------------------------------------------
+
+def _clean_nav_values(nav_series: pd.Series) -> pd.Series:
+    """
+    Remove common currency formatting before converting
+    NAV values into numeric values.
+    """
+
+    cleaned = (
+        nav_series.astype("string")
+        .str.strip()
         .str.replace(",", "", regex=False)
         .str.replace("₹", "", regex=False)
         .str.replace("Rs.", "", regex=False)
+        .str.replace("Rs", "", regex=False)
         .str.strip()
     )
-    frame["nav"] = pd.to_numeric(nav_text, errors="coerce")
 
-    invalid_dates = int(frame["date"].isna().sum())
-    invalid_nav = int(frame["nav"].isna().sum())
-    non_positive_nav = int((frame["nav"].notna() & (frame["nav"] <= 0)).sum())
+    return pd.to_numeric(
+        cleaned,
+        errors="coerce",
+    )
 
-    frame = frame.dropna(subset=["date", "nav"])
-    frame = frame[frame["nav"] > 0].copy()
 
-    duplicate_dates = int(frame.duplicated(subset=["date"]).sum())
-    # Match the existing notebook's cleaning rule: retain the first record for a duplicate date.
-    frame = frame.drop_duplicates(subset=["date"], keep="first")
-    frame = frame.sort_values("date").reset_index(drop=True)
+# ---------------------------------------------------------
+# Common parser for CSV, XLS and XLSX
+# ---------------------------------------------------------
 
-    if frame.empty:
+def parse_fund_file(
+    content: bytes,
+    filename: str,
+) -> ParsedFund:
+    """
+    Parse and validate a fund NAV file.
+
+    Supported formats:
+    - CSV
+    - XLS
+    - XLSX
+
+    Output columns:
+    - date
+    - fund_name
+    - nav
+    - source_file
+    """
+
+    extension = Path(filename).suffix.lower()
+
+    if extension not in SUPPORTED_EXTENSIONS:
         raise CSVValidationError(
-            f"{filename}: no valid observations remain after date/NAV cleaning."
+            f"{filename}: Unsupported file format. "
+            "Supported formats are CSV, XLS and XLSX."
         )
 
-    fund_name = Path(filename).stem.strip() or "Unnamed fund"
-    frame["fund_name"] = fund_name
-    frame["source_file"] = Path(filename).name
-    frame = frame[["date", "fund_name", "nav", "source_file"]]
+    if not content:
+        raise CSVValidationError(
+            f"{filename}: The uploaded file is empty."
+        )
+
+    try:
+        nav_df = _read_fund_file(
+            content=content,
+            filename=filename,
+        )
+
+    except CSVValidationError:
+        raise
+
+    except Exception as error:
+        raise CSVValidationError(
+            f"{filename}: Failed to process file: {error}"
+        ) from error
+
+    if nav_df.empty:
+        raise CSVValidationError(
+            f"{filename}: No NAV records were found."
+        )
+
+    # -----------------------------------------------------
+    # Track original row count
+    # -----------------------------------------------------
+
+    original_rows = len(nav_df)
+
+    # -----------------------------------------------------
+    # Date conversion
+    # -----------------------------------------------------
+
+    nav_df["date"] = pd.to_datetime(
+        nav_df["date"],
+        errors="coerce",
+        dayfirst=True,
+    )
+
+    # -----------------------------------------------------
+    # NAV conversion
+    # -----------------------------------------------------
+
+    nav_df["nav"] = _clean_nav_values(
+        nav_df["nav"]
+    )
+
+    # -----------------------------------------------------
+    # Remove invalid records
+    # -----------------------------------------------------
+
+    invalid_date_rows = int(
+        nav_df["date"].isna().sum()
+    )
+
+    invalid_nav_rows = int(
+        nav_df["nav"].isna().sum()
+    )
+
+    non_positive_nav_rows = int(
+        (nav_df["nav"] <= 0).sum()
+    )
+
+    nav_df = nav_df.dropna(
+        subset=["date", "nav"]
+    ).copy()
+
+    nav_df = nav_df[
+        nav_df["nav"] > 0
+    ].copy()
+
+    # -----------------------------------------------------
+    # Remove duplicate dates
+    # -----------------------------------------------------
+
+    duplicate_date_rows = int(
+        nav_df.duplicated(subset=["date"]).sum()
+    )
+
+    nav_df = nav_df.drop_duplicates(
+        subset=["date"],
+        keep="first",
+    )
+
+    # -----------------------------------------------------
+    # Sort chronologically
+    # -----------------------------------------------------
+
+    nav_df = nav_df.sort_values(
+        by="date"
+    ).reset_index(drop=True)
+
+    if nav_df.empty:
+        raise CSVValidationError(
+            f"{filename}: No valid positive NAV records "
+            "remain after cleaning."
+        )
+
+    # -----------------------------------------------------
+    # Standardized fund information
+    # -----------------------------------------------------
+
+    fund_name = Path(filename).stem
+
+    nav_df["fund_name"] = fund_name
+    nav_df["source_file"] = filename
+
+    nav_df = nav_df[
+        [
+            "date",
+            "fund_name",
+            "nav",
+            "source_file",
+        ]
+    ]
+
+    # -----------------------------------------------------
+    # Cleaning summary
+    # -----------------------------------------------------
+
+    final_rows = len(nav_df)
+
+    removed_rows = original_rows - final_rows
+
+    cleaning = {
+        "original_rows": original_rows,
+        "final_rows": final_rows,
+        "removed_rows": removed_rows,
+        "invalid_date_rows": invalid_date_rows,
+        "invalid_nav_rows": invalid_nav_rows,
+        "non_positive_nav_rows": non_positive_nav_rows,
+        "duplicate_date_rows": duplicate_date_rows,
+    }
+
+    # -----------------------------------------------------
+    # Warnings
+    # -----------------------------------------------------
 
     warnings = []
-    if invalid_dates:
-        warnings.append(f"Removed {invalid_dates} rows with invalid dates.")
-    if invalid_nav:
-        warnings.append(f"Removed {invalid_nav} rows with missing or invalid NAV.")
-    if non_positive_nav:
-        warnings.append(f"Removed {non_positive_nav} rows with zero or negative NAV.")
-    if duplicate_dates:
-        warnings.append(f"Removed {duplicate_dates} duplicate-date rows.")
-    if len(frame) < 252:
+
+    if final_rows < MIN_RECOMMENDED_OBSERVATIONS:
         warnings.append(
-            "Fewer than 252 valid observations: a one-year trading-history forecast "
-            "will not be generated."
+            f"Only {final_rows} valid NAV observations found. "
+            f"At least {MIN_RECOMMENDED_OBSERVATIONS} "
+            "observations are recommended for historical analysis."
+        )
+
+    if removed_rows > 0:
+        warnings.append(
+            f"{removed_rows} rows were removed during data cleaning."
         )
 
     return ParsedFund(
         fund_name=fund_name,
-        source_file=Path(filename).name,
-        data=frame,
+        source_file=filename,
+        data=nav_df,
         warnings=warnings,
-        cleaning={
-            "rows_received": rows_before,
-            "rows_retained": len(frame),
-            "invalid_dates_removed": invalid_dates,
-            "invalid_nav_removed": invalid_nav,
-            "non_positive_nav_removed": non_positive_nav,
-            "duplicate_dates_removed": duplicate_dates,
-        },
+        cleaning=cleaning,
+    )
+
+
+# ---------------------------------------------------------
+# Backward compatibility
+# ---------------------------------------------------------
+
+def parse_fund_csv(
+    content: bytes,
+    filename: str,
+) -> ParsedFund:
+    """
+    Preserve compatibility with existing code that calls
+    parse_fund_csv(). This wrapper accepts CSV files only.
+    """
+
+    if Path(filename).suffix.lower() != ".csv":
+        raise CSVValidationError(
+            f"{filename}: parse_fund_csv() accepts CSV files only. "
+            "Use parse_fund_file() for CSV, XLS and XLSX."
+        )
+
+    return parse_fund_file(
+        content=content,
+        filename=filename,
     )
