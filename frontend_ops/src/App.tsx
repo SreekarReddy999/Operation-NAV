@@ -28,6 +28,12 @@ import {
 } from 'recharts'
 import './index.css'
 
+// Use the configured Render API in production. When this variable is
+// unset locally, Vite's /api proxy continues to handle development requests.
+const API_BASE_URL = (
+  import.meta.env.VITE_API_BASE_URL ?? ''
+).replace(/\/$/, '')
+
 type HistoricalPoint = {
   date: string
   nav: number
@@ -689,10 +695,13 @@ function App() {
         formData.append('files', file)
       })
 
-      const response = await fetch('/api/v1/analyze', {
-        method: 'POST',
-        body: formData,
-      })
+      const response = await fetch(
+        `${API_BASE_URL}/api/v1/analyze`,
+        {
+          method: 'POST',
+          body: formData,
+        },
+      )
 
       const data = await response.json()
 
