@@ -1,1 +1,1 @@
-Application for NAV analysis.
+Application for NAV analysis -------> https://fund-board.vercel.app/
