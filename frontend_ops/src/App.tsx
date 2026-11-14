@@ -789,14 +789,6 @@ function App() {
           </div>
         )}
 
-        <div className="sidebar-footer">
-          <div className="status-indicator" />
-
-          <div>
-            <strong>Local environment</strong>
-            <span>API workspace</span>
-          </div>
-        </div>
       </aside>
 
       <main className="main-content">
@@ -809,10 +801,6 @@ function App() {
             <h2>Fund analysis</h2>
           </div>
 
-          <div className="topbar-status">
-            <span className="live-dot" />
-            Backend connected
-          </div>
         </header>
 
         <section className="welcome-section">
