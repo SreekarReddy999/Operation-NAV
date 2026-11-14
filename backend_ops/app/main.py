@@ -1,4 +1,5 @@
 from __future__ import annotations
+from starlette.concurrency import run_in_threadpool
 
 from typing import Annotated
 
@@ -115,7 +116,10 @@ async def analyze_fund_files(
     ]
 
     try:
-        results = analyse_funds(funds_for_analysis)
+        results = await run_in_threadpool(
+            analyse_funds,
+            funds_for_analysis,
+        )
 
     except Exception as exc:
         raise HTTPException(
@@ -141,7 +145,7 @@ async def analyze_fund_files(
         "chart_contract": {
             "one_result_per_fund": True,
             "historical_series": "historical",
-            "forecast_series": "forecast",
+            ##"forecast_series": "forecast",
             "x_axis": "date",
             "y_axis": "nav",
         },
