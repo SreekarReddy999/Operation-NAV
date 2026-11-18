@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
   Activity,
@@ -26,6 +26,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { clearAnalysis, loadAnalysis, saveAnalysis } from './analysisStorage'
 import './index.css'
 
 // Use the configured Render API in production. When this variable is
@@ -607,6 +608,70 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [selectedFundIndex, setSelectedFundIndex] = useState(0)
+  const [currentPath, setCurrentPath] = useState(() =>
+    window.location.pathname === '/analysis' ? '/analysis' : '/',
+  )
+  const [isRestoring, setIsRestoring] = useState(true)
+
+  // Restore the last successful analysis when the app is opened or refreshed.
+  useEffect(() => {
+    let cancelled = false
+
+    const restoreAnalysis = async () => {
+      try {
+        const saved = await loadAnalysis<ApiResponse>()
+
+        if (!cancelled && saved?.results) {
+          const savedFunds = Array.isArray(saved.results.funds)
+            ? saved.results.funds
+            : []
+          const safeIndex = Math.min(
+            Math.max(saved.selectedFundIndex, 0),
+            Math.max(savedFunds.length - 1, 0),
+          )
+
+          setResults(saved.results)
+          setSelectedFundIndex(safeIndex)
+        }
+      } catch {
+        if (!cancelled) {
+          setError('Your saved analysis could not be restored in this browser.')
+        }
+      } finally {
+        if (!cancelled) setIsRestoring(false)
+      }
+    }
+
+    const handlePopState = () => {
+      setCurrentPath(
+        window.location.pathname === '/analysis' ? '/analysis' : '/',
+      )
+    }
+
+    window.addEventListener('popstate', handlePopState)
+    void restoreAnalysis()
+
+    return () => {
+      cancelled = true
+      window.removeEventListener('popstate', handlePopState)
+    }
+  }, [])
+
+  const navigateTo = (path: '/' | '/analysis') => {
+    if (window.location.pathname !== path) {
+      window.history.pushState({}, '', path)
+    }
+    setCurrentPath(path)
+  }
+
+  const selectFund = (index: number) => {
+    setSelectedFundIndex(index)
+    if (results) {
+      void saveAnalysis(results, index).catch(() => {
+        setError('The selected fund could not be saved for your next visit.')
+      })
+    }
+  }
 
   const funds = Array.isArray(results?.funds)
     ? results.funds
@@ -628,6 +693,7 @@ function App() {
   const invalidateAnalysis = () => {
     setResults(null)
     setSelectedFundIndex(0)
+    void clearAnalysis().catch(() => undefined)
   }
 
   const addFiles = (selectedFiles: FileList | null) => {
@@ -675,6 +741,7 @@ function App() {
     setResults(null)
     setSelectedFundIndex(0)
     setError('')
+    void clearAnalysis().catch(() => undefined)
   }
 
   const analyzeFiles = async () => {
@@ -687,6 +754,7 @@ function App() {
     setError('')
     setResults(null)
     setSelectedFundIndex(0)
+    void clearAnalysis().catch(() => undefined)
 
     try {
       const formData = new FormData()
@@ -719,6 +787,16 @@ function App() {
 
       setResults(apiResults)
       setSelectedFundIndex(0)
+
+      try {
+        await saveAnalysis(apiResults, 0)
+      } catch {
+        setError(
+          'Analysis completed, but this browser could not save a persistent copy. Keep this tab open to view the results.',
+        )
+      }
+
+      navigateTo('/analysis')
     } catch (err) {
       setError(
         err instanceof Error
@@ -747,10 +825,23 @@ function App() {
         <div className="sidebar-section">
           <p className="section-label">WORKSPACE</p>
 
-          <div className="nav-item active">
+          <button
+            className={`nav-item ${currentPath === '/' ? 'active' : ''}`}
+            type="button"
+            onClick={() => navigateTo('/')}
+          >
+            <CloudUpload size={18} />
+            <span>Upload data</span>
+          </button>
+
+          <button
+            className={`nav-item ${currentPath === '/analysis' ? 'active' : ''}`}
+            type="button"
+            onClick={() => navigateTo('/analysis')}
+          >
             <Layers3 size={18} />
             <span>Fund analysis</span>
-          </div>
+          </button>
         </div>
 
         {funds.length > 0 && (
@@ -768,7 +859,7 @@ function App() {
                   className={`fund-nav-item ${
                     selectedFundIndex === index ? 'selected' : ''
                   }`}
-                  onClick={() => setSelectedFundIndex(index)}
+                  onClick={() => selectFund(index)}
                   title={fund.fund_name}
                 >
                   <span className="fund-nav-number">
@@ -795,14 +886,16 @@ function App() {
         <header className="topbar">
           <div>
             <span className="breadcrumb">
-              WORKSPACE / ANALYSIS
+              WORKSPACE / {currentPath === '/analysis' ? 'ANALYSIS' : 'UPLOAD'}
             </span>
 
-            <h2>Fund analysis</h2>
+            <h2>{currentPath === '/analysis' ? 'Fund analysis' : 'Upload fund data'}</h2>
           </div>
 
         </header>
 
+        {currentPath === '/' && (
+          <>
         <section className="welcome-section">
           <div>
             <div className="eyebrow">
@@ -946,8 +1039,19 @@ function App() {
             </div>
           )}
         </section>
+          </>
+        )}
 
-        {results && (
+        {currentPath === '/analysis' && (
+          isRestoring ? (
+            <div className="page-state-panel">
+              <LoaderCircle className="spin" size={22} />
+              <strong>Restoring your saved analysis...</strong>
+              <span>Your previous results are being loaded from this browser.</span>
+            </div>
+          ) : results ? (
+          <>
+          {error && <div className="error-message" role="alert">{error}</div>}
           <section className="results-section">
             <div className="section-heading">
               <div>
@@ -1033,6 +1137,18 @@ function App() {
                 </div>
               )}
           </section>
+          </>
+          ) : (
+            <div className="page-state-panel">
+              <Layers3 size={24} />
+              <strong>No saved analysis found</strong>
+              <span>Upload your fund files and run an analysis to see results here.</span>
+              <button type="button" onClick={() => navigateTo('/')}>
+                Go to file upload
+                <ArrowUpRight size={16} />
+              </button>
+            </div>
+          )
         )}
 
         <footer className="disclaimer">
