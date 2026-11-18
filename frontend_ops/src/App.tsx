@@ -1,4 +1,5 @@
-import { memo, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
+import { clearAnalysis, loadAnalysis, saveAnalysis } from './analysisStorage'
 import type { ReactNode } from 'react'
 import {
   Activity,
@@ -15,6 +16,7 @@ import {
   Sparkles,
   TrendingDown,
   TrendingUp,
+  Trash2,
   X,
 } from 'lucide-react'
 import {
@@ -306,14 +308,14 @@ const FundDashboard = memo(function FundDashboard({
       <div className="metrics-grid">
         <MetricCard
           label="Latest NAV"
-          value={formatNumber(metrics.latest_nav, 4)}
+          value={formatNumber(metrics.latest_nav, 2)}
           description={`As of ${formatDate(metrics.end_date)}`}
           icon={<Activity size={17} />}
         />
 
         <MetricCard
           label="Starting NAV"
-          value={formatNumber(metrics.starting_nav, 4)}
+          value={formatNumber(metrics.starting_nav, 2)}
           description={`Since ${formatDate(metrics.start_date)}`}
           icon={<Layers3 size={17} />}
         />
@@ -438,7 +440,7 @@ const FundDashboard = memo(function FundDashboard({
                       formatDate(String(value))
                     }
                     formatter={(value) => [
-                      Number(value).toFixed(4),
+                      Number(value).toFixed(2),
                       'NAV',
                     ]}
                   />
@@ -607,6 +609,101 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [selectedFundIndex, setSelectedFundIndex] = useState(0)
+  const [page, setPage] = useState<'upload' | 'analysis'>(() =>
+    window.location.hash === '#/analysis' ? 'analysis' : 'upload',
+  )
+  const [storageReady, setStorageReady] = useState(false)
+  const [storageError, setStorageError] = useState('')
+
+  // Restore the most recent analysis when the app opens or refreshes.
+  useEffect(() => {
+    let active = true
+
+    const restoreAnalysis = async () => {
+      try {
+        const saved = await loadAnalysis<ApiResponse>()
+
+        if (!active) return
+
+        if (saved?.results) {
+          setResults(saved.results)
+          const restoredFundCount = Array.isArray(saved.results.funds)
+            ? saved.results.funds.length
+            : 0
+
+          setSelectedFundIndex(
+            restoredFundCount > 0
+              ? Math.min(
+                  Math.max(saved.selectedFundIndex, 0),
+                  restoredFundCount - 1,
+                )
+              : 0,
+          )
+        } else if (window.location.hash === '#/analysis') {
+          window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#/upload`)
+          setPage('upload')
+        }
+      } catch (err) {
+        if (active) {
+          setStorageError(
+            err instanceof Error
+              ? err.message
+              : 'Could not restore the saved analysis.',
+          )
+        }
+      } finally {
+        if (active) setStorageReady(true)
+      }
+    }
+
+    void restoreAnalysis()
+
+    return () => {
+      active = false
+    }
+  }, [])
+
+  // Keep the in-app page synchronized with browser Back and Forward.
+  useEffect(() => {
+    const syncPageFromUrl = () => {
+      setPage(window.location.hash === '#/analysis' ? 'analysis' : 'upload')
+    }
+
+    window.addEventListener('popstate', syncPageFromUrl)
+    window.addEventListener('hashchange', syncPageFromUrl)
+
+    return () => {
+      window.removeEventListener('popstate', syncPageFromUrl)
+      window.removeEventListener('hashchange', syncPageFromUrl)
+    }
+  }, [])
+
+  const navigate = (nextPage: 'upload' | 'analysis') => {
+    const nextHash = nextPage === 'analysis' ? '#/analysis' : '#/upload'
+
+    if (window.location.hash !== nextHash) {
+      window.history.pushState(
+        null,
+        '',
+        `${window.location.pathname}${window.location.search}${nextHash}`,
+      )
+    }
+
+    setPage(nextPage)
+  }
+
+  // Persist fund selection changes after the initial restore has completed.
+  useEffect(() => {
+    if (!storageReady || !results) return
+
+    void saveAnalysis(results, selectedFundIndex).catch((err: unknown) => {
+      setStorageError(
+        err instanceof Error
+          ? err.message
+          : 'Could not save the selected fund.',
+      )
+    })
+  }, [results, selectedFundIndex, storageReady])
 
   const funds = Array.isArray(results?.funds)
     ? results.funds
@@ -628,6 +725,15 @@ function App() {
   const invalidateAnalysis = () => {
     setResults(null)
     setSelectedFundIndex(0)
+    setStorageError('')
+    void clearAnalysis().catch((err: unknown) => {
+      setStorageError(
+        err instanceof Error
+          ? err.message
+          : 'Could not clear the saved analysis.',
+      )
+    })
+    navigate('upload')
   }
 
   const addFiles = (selectedFiles: FileList | null) => {
@@ -675,6 +781,16 @@ function App() {
     setResults(null)
     setSelectedFundIndex(0)
     setError('')
+    setStorageError('')
+    navigate('upload')
+
+    void clearAnalysis().catch((err: unknown) => {
+      setStorageError(
+        err instanceof Error
+          ? err.message
+          : 'Could not clear the saved analysis.',
+      )
+    })
   }
 
   const analyzeFiles = async () => {
@@ -687,6 +803,17 @@ function App() {
     setError('')
     setResults(null)
     setSelectedFundIndex(0)
+
+    try {
+      await clearAnalysis()
+      setStorageError('')
+    } catch (storageErr) {
+      setStorageError(
+        storageErr instanceof Error
+          ? storageErr.message
+          : 'Could not clear the previous saved analysis.',
+      )
+    }
 
     try {
       const formData = new FormData()
@@ -717,8 +844,22 @@ function App() {
 
       const apiResults = data as ApiResponse
 
+      // Save before navigating so a refresh immediately after analysis
+      // can still restore the completed results.
+      try {
+        await saveAnalysis(apiResults, 0)
+        setStorageError('')
+      } catch (storageErr) {
+        setStorageError(
+          storageErr instanceof Error
+            ? storageErr.message
+            : 'Analysis completed, but its results could not be saved.',
+        )
+      }
+
       setResults(apiResults)
       setSelectedFundIndex(0)
+      navigate('analysis')
     } catch (err) {
       setError(
         err instanceof Error
@@ -747,7 +888,37 @@ function App() {
         <div className="sidebar-section">
           <p className="section-label">WORKSPACE</p>
 
-          <div className="nav-item active">
+          <div
+            className={`nav-item ${page === 'upload' ? 'active' : ''}`}
+            role="button"
+            tabIndex={0}
+            onClick={() => navigate('upload')}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault()
+                navigate('upload')
+              }
+            }}
+          >
+            <CloudUpload size={18} />
+            <span>Upload funds</span>
+          </div>
+
+          <div
+            className={`nav-item ${page === 'analysis' ? 'active' : ''}`}
+            role="button"
+            tabIndex={0}
+            aria-disabled={!results}
+            onClick={() => {
+              if (results) navigate('analysis')
+            }}
+            onKeyDown={(event) => {
+              if (results && (event.key === 'Enter' || event.key === ' ')) {
+                event.preventDefault()
+                navigate('analysis')
+              }
+            }}
+          >
             <Layers3 size={18} />
             <span>Fund analysis</span>
           </div>
@@ -768,7 +939,10 @@ function App() {
                   className={`fund-nav-item ${
                     selectedFundIndex === index ? 'selected' : ''
                   }`}
-                  onClick={() => setSelectedFundIndex(index)}
+                  onClick={() => {
+                    setSelectedFundIndex(index)
+                    navigate('analysis')
+                  }}
                   title={fund.fund_name}
                 >
                   <span className="fund-nav-number">
@@ -795,14 +969,25 @@ function App() {
         <header className="topbar">
           <div>
             <span className="breadcrumb">
-              WORKSPACE / ANALYSIS
+              WORKSPACE / {page === 'analysis' ? 'ANALYSIS' : 'UPLOAD'}
             </span>
 
-            <h2>Fund analysis</h2>
+            <h2>{page === 'analysis' ? 'Analysis results' : 'Fund analysis'}</h2>
           </div>
 
+          {page === 'analysis' && (
+            <button
+              className="text-button"
+              type="button"
+              onClick={() => navigate('upload')}
+            >
+              Back to upload
+            </button>
+          )}
         </header>
 
+        {page === 'upload' && (
+        <>
         <section className="welcome-section">
           <div>
             <div className="eyebrow">
@@ -945,9 +1130,22 @@ function App() {
               {error}
             </div>
           )}
-        </section>
 
-        {results && (
+          <button
+            className="clear-workspace-button"
+            onClick={clearWorkspace}
+            disabled={loading}
+            type="button"
+          >
+            <Trash2 size={16} />
+            Clear workspace
+          </button>
+        </section>
+        </>
+        )}
+
+        {page === 'analysis' && (
+          results ? (
           <section className="results-section">
             <div className="section-heading">
               <div>
@@ -1033,6 +1231,34 @@ function App() {
                 </div>
               )}
           </section>
+          ) : (
+            <section className="page-state-panel">
+              {storageReady ? (
+                <>
+                  <h3>No saved analysis found</h3>
+                  <p>Upload your fund data and run an analysis to view results here.</p>
+                  <button
+                    className="text-button"
+                    type="button"
+                    onClick={() => navigate('upload')}
+                  >
+                    Go to upload
+                  </button>
+                </>
+              ) : (
+                <>
+                  <h3>Restoring your analysis...</h3>
+                  <p>Please wait while your saved fund results are loaded.</p>
+                </>
+              )}
+            </section>
+          )
+        )}
+
+        {storageError && (
+          <div className="error-message" role="status">
+            Saved analysis storage: {storageError}
+          </div>
         )}
 
         <footer className="disclaimer">

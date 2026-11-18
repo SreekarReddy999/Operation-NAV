@@ -198,6 +198,15 @@ button:disabled {
 
   font-size: 12px;
   font-weight: 500;
+  cursor: pointer;
+  transition: color 0.18s ease, text-shadow 0.18s ease;
+}
+
+.nav-item:hover,
+.nav-item:focus-visible {
+  color: #fff;
+  text-shadow: 0 0 9px rgba(255, 255, 255, 0.65);
+  outline: none;
 }
 
 .nav-item.active {
@@ -660,11 +669,17 @@ button:disabled {
   color: #b99aef;
   background: transparent;
   border: 0;
+  border-radius: 6px;
   font-size: 10px;
+  transition: color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
 }
 
-.text-button:hover {
-  color: #d8c5ff;
+.text-button:hover,
+.text-button:focus-visible {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.055);
+  box-shadow: 0 0 14px rgba(255, 255, 255, 0.10);
+  outline: none;
 }
 
 .file-row {
@@ -743,6 +758,38 @@ button:disabled {
 .analyze-button:hover:not(:disabled) {
   background: linear-gradient(110deg, #966be8, #8053d0);
   transform: translateY(-1px);
+}
+
+.clear-workspace-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+
+  width: 100%;
+  margin-top: 12px;
+  padding: 11px 16px;
+
+  color: #c9c4d2;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 9px;
+
+  font-size: 11px;
+  font-weight: 600;
+  transition: 0.2s ease;
+}
+
+.clear-workspace-button:hover:not(:disabled) {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.24);
+  box-shadow: 0 0 18px rgba(255, 255, 255, 0.09);
+}
+
+.clear-workspace-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .spin {
@@ -1628,4 +1675,66 @@ button:disabled {
   color: #9298aa;
   font-size: 11px;
   line-height: 1.5;
+}
+
+/* =========================================
+   ANALYSIS PAGE STATES
+   ========================================= */
+
+.page-state-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+
+  min-height: 260px;
+  margin-bottom: 28px;
+  padding: 30px;
+
+  color: #aaa4b8;
+  background: rgba(17, 17, 22, 0.85);
+  border: 1px solid var(--border);
+  border-radius: 13px;
+
+  text-align: center;
+}
+
+.page-state-panel > svg {
+  color: #b99af1;
+}
+
+.page-state-panel strong {
+  color: #eeeaf5;
+  font: 600 16px 'Space Grotesk', sans-serif;
+}
+
+.page-state-panel span {
+  max-width: 420px;
+  color: #928c9e;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.page-state-panel button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+
+  margin-top: 8px;
+  padding: 10px 15px;
+
+  color: #fff;
+  background: linear-gradient(110deg, #8256d8, #7044c0);
+  border: 1px solid rgba(196, 165, 255, 0.25);
+  border-radius: 8px;
+
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.page-state-panel button:hover {
+  background: linear-gradient(110deg, #966be8, #8053d0);
 }
